@@ -1,0 +1,8 @@
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+outputs/
+figures/
+.DS_Store
+Thumbs.db
