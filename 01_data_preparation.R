@@ -358,7 +358,9 @@ d <- d %>%
 
 
 # --- 2.8 Analysis grouping variables ------------------------------------- #
-# Age cohorts (split at 35; post-protocol specification; missing age -> NA).
+# Age cohorts split at 35 (post-protocol specification; missing age -> NA);
+# sensitivity analysis only, the primary median split is formed in
+# 02_data_analysis.R (5.9.2).
 d <- d %>%
   mutate(age_group = case_when(
     is.na(age) ~ NA_character_,

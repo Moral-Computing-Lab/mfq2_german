@@ -35,6 +35,7 @@
 #   5.5 Measurement invariance
 #   5.6 Nomological network (H2-H6)
 #   5.7 Exploratory analyses (E1-E3)
+#   5.9 Additional analyses (not pre-registered)
 # Phase 6: Figures
 #   6.1 Theme and output directory
 #   6.2 Participant flow diagram (CONSORT)
@@ -949,7 +950,8 @@ if (length(gender_n) == 2 && all(gender_n >= 200)) {
 }
 
 # --- 5.5b Age cohort invariance ------------------------------------------- #
-# Cohorts split at age 35; age_group is defined in 01_data_preparation.R (2.8).
+# Cohorts split at age 35 (sensitivity analysis; the primary age grouping is
+# the median split in 5.9.2); age_group is defined in 01_data_preparation.R (2.8).
 d_age_inv <- d %>% filter(!is.na(age_group))
 age_n <- table(d_age_inv$age_group)
 message("Age group sizes:")
@@ -1358,6 +1360,165 @@ message(sprintf("H6  (Care):     r = %.3f, p = %.3f.", h6$estimate,  h6$p.value)
 
 message("Exclusion log:")
 print(exclusion_log)
+
+
+# --- 5.9 Additional analyses (not pre-registered) ------------------------ #
+# Correlation CIs, age invariance at the median, full loading matrices, and
+# invariance per subscale.
+
+# --- 5.9.1 Correlations with 95% CIs -------------------------------------- #
+# Fisher-z CIs from cor.test(); subscale intercorrelations without correction
+# (descriptive), nomological pool with the BH adjustment from E1.
+cor_ci_row <- function(x, y, x_name, y_name, family) {
+  ct <- cor.test(x, y, method = "pearson")
+  data.frame(
+    family = family, var1 = x_name, var2 = y_name,
+    r = unname(ct$estimate), ci_lo = ct$conf.int[1], ci_hi = ct$conf.int[2],
+    n = sum(complete.cases(x, y)), df = unname(ct$parameter),
+    p_raw = ct$p.value, stringsAsFactors = FALSE
+  )
+}
+
+subscale_pairs <- combn(mfq_subscale_vars, 2, simplify = FALSE)
+cor_ci_inter <- do.call(rbind, lapply(subscale_pairs, function(pr) {
+  cor_ci_row(d[[pr[1]]], d[[pr[2]]], pr[1], pr[2], "intercorrelation")
+}))
+cor_ci_inter$p_BH <- NA_real_
+
+cor_ci_nom <- do.call(rbind, lapply(seq_len(nrow(e1_results)), function(i) {
+  cor_ci_row(d[[e1_results$mfq_subscale[i]]], d[[e1_results$validation_var[i]]],
+             e1_results$mfq_subscale[i], e1_results$validation_var[i], "nomological")
+}))
+cor_ci_nom$p_BH <- e1_results$p_BH
+stopifnot(isTRUE(all.equal(cor_ci_nom$r, e1_results$r)))
+
+cor_ci_all <- rbind(cor_ci_inter, cor_ci_nom)
+message(sprintf("Correlations with 95%% CIs: %d intercorrelations, %d nomological.",
+                nrow(cor_ci_inter), nrow(cor_ci_nom)))
+print(cor_ci_all %>% mutate(across(c(r, ci_lo, ci_hi), ~ round(.x, 3))), row.names = FALSE)
+
+h3_ci <- confint(h3_model)["pol_1_lrscale", ]
+message(sprintf("  H3: b = %.3f, 95%% CI [%.3f, %.3f].",
+                unname(h3_coef), h3_ci[1], h3_ci[2]))
+
+# --- 5.9.2 Age invariance at the median ----------------------------------- #
+# Primary age grouping: median split (<= median vs. > median). The cut-off at
+# 35 (age_group, 5.5b) is reported as sensitivity analysis.
+run_invariance <- function(syntax, data, group, analysis) {
+  fits <- list(
+    configural = cfa(syntax, data = data, group = group,
+                     estimator = "MLR", missing = "fiml"),
+    metric     = cfa(syntax, data = data, group = group,
+                     estimator = "MLR", missing = "fiml",
+                     group.equal = "loadings"),
+    scalar     = cfa(syntax, data = data, group = group,
+                     estimator = "MLR", missing = "fiml",
+                     group.equal = c("loadings", "intercepts"))
+  )
+  fm <- t(sapply(fits, function(f) fitMeasures(
+    f, c("chisq.scaled", "df.scaled", "cfi.robust", "rmsea.robust"))))
+  n_tab <- table(data[[group]])
+  out <- data.frame(
+    analysis = analysis, grouping = group, model = names(fits),
+    group_sizes = paste(sprintf("%s = %d", names(n_tab), as.integer(n_tab)),
+                        collapse = "; "),
+    chisq = fm[, "chisq.scaled"], df = fm[, "df.scaled"],
+    cfi = fm[, "cfi.robust"], rmsea = fm[, "rmsea.robust"],
+    converged = sapply(fits, lavInspect, "converged"),
+    row.names = NULL, stringsAsFactors = FALSE
+  )
+  out$delta_cfi   <- c(NA, diff(out$cfi))
+  out$delta_rmsea <- c(NA, diff(out$rmsea))
+  out$supported   <- ifelse(is.na(out$delta_cfi), NA,
+                            out$delta_cfi >= -0.010 & out$delta_rmsea <= 0.015)
+  out
+}
+
+age_median <- median(d$age, na.rm = TRUE)
+d_age_med  <- d %>%
+  filter(!is.na(age)) %>%
+  mutate(age_group_median = ifelse(age <= age_median, "Younger", "Older"))
+message(sprintf("Age median = %.1f years.", age_median))
+print(table(d_age_med$age_group_median))
+
+inv_age <- rbind(
+  run_invariance(cfa_6f_syntax, d_age_med, "age_group_median", "CFA 6-factor, age median split"),
+  run_invariance(cfa_6f_syntax, d_age_inv, "age_group", "CFA 6-factor, age cut-off 35 (sensitivity)")
+)
+message("Age invariance (median split and cut-off 35):")
+print(inv_age %>% mutate(across(c(cfi, rmsea, delta_cfi, delta_rmsea), ~ round(.x, 3))),
+      row.names = FALSE)
+
+# --- 5.9.3 Full standardized loading matrices ----------------------------- #
+# CFA 6-factor in the validation subsample is the only newly estimated model.
+fit_cfa_6f_val <- cfa(cfa_6f_syntax, data = d_validation,
+                      estimator = "MLR", missing = "fiml")
+fit_cfa_7f_val <- if (selected_model == "CFA 7-factor") fit_best_validation else
+  cfa(cfa_7f_syntax, data = d_validation, estimator = "MLR", missing = "fiml")
+
+loading_long <- function(fit, model, sample_label) {
+  standardizedSolution(fit) %>%
+    filter(op == "=~") %>%
+    transmute(model = model, sample = sample_label, item = rhs, factor = lhs,
+              lambda = est.std, se = se, p = pvalue)
+}
+loadings_full <- rbind(
+  loading_long(fit_esem_6f_cal,        "ESEM 6-factor", "calibration"),
+  loading_long(fit_esem_6f_validation, "ESEM 6-factor", "validation"),
+  loading_long(fit_cfa_6f_cal,         "CFA 6-factor",  "calibration"),
+  loading_long(fit_cfa_6f_val,         "CFA 6-factor",  "validation"),
+  loading_long(fit_cfa_7f_cal,         "CFA 7-factor",  "calibration"),
+  loading_long(fit_cfa_7f_val,         "CFA 7-factor",  "validation")
+)
+message(sprintf("Loading matrices: %d loadings across %d model x sample blocks.",
+                nrow(loadings_full), nrow(distinct(loadings_full, model, sample))))
+
+# --- 5.9.4 Measurement invariance per subscale ---------------------------- #
+# One-factor CFA per subscale; configural model adequate if CFI > .90 and
+# RMSEA < .08. Loyalty is additionally modelled with two factors
+# (Country/Group) only if its one-factor configural model is not adequate.
+subscale_item_sets <- list(
+  Care = mfq_care_items, Equality = mfq_equa_items,
+  Proportionality = mfq_pro_items, Loyalty = mfq_loya_items,
+  Authority = mfq_auth_items, Purity = mfq_pur_items
+)
+one_factor_syntax <- function(name, items) {
+  sprintf("%s =~ %s", name, paste(items, collapse = " + "))
+}
+loyalty_2f_syntax <- sprintf(
+  "CountryLoyalty =~ %s\nGroupLoyalty =~ %s",
+  paste(mfq_country_loyalty_items, collapse = " + "),
+  paste(mfq_group_loyalty_items, collapse = " + ")
+)
+inv_groupings <- list(
+  list(data = d_gender_inv, group = "gender"),
+  list(data = d_age_med,    group = "age_group_median")
+)
+
+inv_sub_list <- list()
+for (grp in inv_groupings) {
+  for (sub_name in names(subscale_item_sets)) {
+    inv_1f <- run_invariance(one_factor_syntax(sub_name, subscale_item_sets[[sub_name]]),
+                             grp$data, grp$group, paste0(sub_name, " (one-factor)"))
+    inv_1f$subscale <- sub_name
+    inv_1f$configural_adequate <- inv_1f$cfi[1] > 0.90 & inv_1f$rmsea[1] < 0.08
+    inv_sub_list[[length(inv_sub_list) + 1]] <- inv_1f
+    if (sub_name == "Loyalty" && !inv_1f$configural_adequate[1]) {
+      inv_2f <- run_invariance(loyalty_2f_syntax, grp$data, grp$group,
+                               "Loyalty (two-factor: Country/Group)")
+      inv_2f$subscale <- "Loyalty"
+      inv_2f$configural_adequate <- inv_2f$cfi[1] > 0.90 & inv_2f$rmsea[1] < 0.08
+      inv_sub_list[[length(inv_sub_list) + 1]] <- inv_2f
+    }
+  }
+}
+inv_subscales <- do.call(rbind, inv_sub_list)
+message("Measurement invariance per subscale (gender, age median split):")
+print(inv_subscales %>%
+        select(grouping, analysis, model, cfi, rmsea, delta_cfi, delta_rmsea,
+               supported, configural_adequate) %>%
+        mutate(across(c(cfi, rmsea, delta_cfi, delta_rmsea), ~ round(.x, 3))),
+      row.names = FALSE)
 
 
 #### --- Phase 6: Figures ------------------------------------------------- ####
@@ -1818,5 +1979,12 @@ write.csv(e2_sensitivity_relig, file.path(out_dir, "E2_religiosity_sensitivity.c
           row.names = FALSE)
 write.csv(e3_results,           file.path(out_dir, "E3_regression_betas.csv"),  row.names = FALSE)
 write.csv(e3_omnibus,           file.path(out_dir, "E3_regression_omnibus.csv"),row.names = FALSE)
+write.csv(cor_ci_all,     file.path(out_dir, "correlations_ci.csv"),      row.names = FALSE)
+write.csv(data.frame(term = "pol_1_lrscale", b = unname(h3_coef),
+                     ci_lo = h3_ci[1], ci_hi = h3_ci[2]),
+          file.path(out_dir, "h3_ci.csv"), row.names = FALSE)
+write.csv(inv_age,        file.path(out_dir, "invariance_age.csv"),       row.names = FALSE)
+write.csv(inv_subscales,  file.path(out_dir, "invariance_subscales.csv"), row.names = FALSE)
+write.csv(loadings_full,  file.path(out_dir, "loadings_full.csv"),        row.names = FALSE)
 save.image(file.path(out_dir, "analysis_workspace.RData"))
 message(sprintf("Outputs and workspace written to %s.", normalizePath(out_dir)))
